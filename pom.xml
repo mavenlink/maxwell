@@ -164,6 +164,13 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+      <!-- KPL 1.x generated protobuf code requires protobuf-java 4.x.
+           Pin here so it wins over the 3.x dragged in by google-cloud-bigquerystorage. -->
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>4.29.0</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -323,7 +330,6 @@
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
-      <version>3.25.5</version>
     </dependency>
     <dependency>
       <groupId>redis.clients</groupId>
