@@ -1,12 +1,5 @@
 package com.zendesk.maxwell.producer;
 
-import com.amazonaws.services.sns.AmazonSNS;
-import com.amazonaws.services.sns.AmazonSNSAsync;
-import com.amazonaws.services.sns.AmazonSNSAsyncClient;
-import com.amazonaws.services.sns.AmazonSNSAsyncClientBuilder;
-import com.amazonaws.services.sns.model.MessageAttributeValue;
-import com.amazonaws.services.sns.model.PublishRequest;
-import com.amazonaws.services.sns.model.PublishResult;
 import com.zendesk.maxwell.MaxwellConfig;
 import com.zendesk.maxwell.MaxwellContext;
 import com.zendesk.maxwell.monitoring.NoOpMetrics;
@@ -22,21 +15,29 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
+import software.amazon.awssdk.services.sns.SnsAsyncClient;
+import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sns.model.PublishRequest;
+import software.amazon.awssdk.services.sns.model.PublishResponse;
 
 import java.util.ArrayList;
 import java.util.Map;
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.*;
+
 public class MaxwellSNSProducerTest {
 
 	private static final long TIMESTAMP_MILLISECONDS = 1496712943447L;
 	private static final String TOPIC = "topic";
 	private static final String FIFO_TOPIC = "topic.fifo";
 	private static final Position POSITION = new Position(new BinlogPosition(1L, "binlog-0001"), 0L);
-	private static final Future<PublishResult> mockedFuture = Mockito.mock(Future.class);
+	private static final CompletableFuture<PublishResponse> mockedFuture =
+			CompletableFuture.completedFuture(PublishResponse.builder().messageId("mid").build());
+
 	@Rule
 	public final EnvironmentVariables environmentVariables
 			= new EnvironmentVariables();
@@ -55,7 +56,7 @@ public class MaxwellSNSProducerTest {
 
 	@Test
 	public void publishesRecord() throws Exception {
-		AmazonSNSAsyncClient client = Mockito.mock(AmazonSNSAsyncClient.class);
+		SnsAsyncClient client = Mockito.mock(SnsAsyncClient.class);
 		MaxwellContext context = mock(MaxwellContext.class);
 		when(context.getConfig()).thenReturn(new MaxwellConfig());
 		when(context.getMetrics()).thenReturn(new NoOpMetrics());
@@ -63,16 +64,16 @@ public class MaxwellSNSProducerTest {
 		producer.setClient(client);
 		String payload = rowMap.toJSON();
 		AbstractAsyncProducer.CallbackCompleter cc = mock(AbstractAsyncProducer.CallbackCompleter.class);
-		when(client.publishAsync(any())).thenReturn(mockedFuture);
+		when(client.publish(any(PublishRequest.class))).thenReturn(mockedFuture);
 		producer.sendAsync(rowMap, cc);
-		Mockito.verify(client, times(1)).publishAsync(arguments.capture(), any());
-		Assert.assertEquals(arguments.getValue().getTopicArn(), TOPIC);
-		Assert.assertEquals(arguments.getValue().getMessage(), payload);
+		Mockito.verify(client, times(1)).publish(arguments.capture());
+		Assert.assertEquals(arguments.getValue().topicArn(), TOPIC);
+		Assert.assertEquals(arguments.getValue().message(), payload);
 	}
 
 	@Test
 	public void setsMessageAttributes() throws Exception {
-		AmazonSNSAsyncClient client = Mockito.mock(AmazonSNSAsyncClient.class);
+		SnsAsyncClient client = Mockito.mock(SnsAsyncClient.class);
 		MaxwellContext context = mock(MaxwellContext.class);
 		MaxwellConfig config = new MaxwellConfig();
 		config.snsAttrs = "database,table";
@@ -81,29 +82,28 @@ public class MaxwellSNSProducerTest {
 		MaxwellSNSProducer producer = new MaxwellSNSProducer(context, TOPIC, "", "");
 		producer.setClient(client);
 		AbstractAsyncProducer.CallbackCompleter cc = mock(AbstractAsyncProducer.CallbackCompleter.class);
-		when(client.publishAsync(any())).thenReturn(mockedFuture);
+		when(client.publish(any(PublishRequest.class))).thenReturn(mockedFuture);
 		producer.sendAsync(rowMap, cc);
-		Mockito.verify(client, times(1)).publishAsync(arguments.capture(), any());
-		Map<String, MessageAttributeValue> attributes = arguments.getValue().getMessageAttributes();
+		Mockito.verify(client, times(1)).publish(arguments.capture());
+		Map<String, MessageAttributeValue> attributes = arguments.getValue().messageAttributes();
 		Assert.assertNotNull(attributes.getOrDefault("table", null));
-		Assert.assertEquals("MyTable", attributes.get("table").getStringValue());
+		Assert.assertEquals("MyTable", attributes.get("table").stringValue());
 		Assert.assertNotNull(attributes.getOrDefault("database", null));
-		Assert.assertEquals("MyDatabase", attributes.get("database").getStringValue());
+		Assert.assertEquals("MyDatabase", attributes.get("database").stringValue());
 	}
 
 	@Test
 	public void ensureMessageGroupIdOnFifo() throws Exception {
-		AmazonSNSAsyncClient client = Mockito.mock(AmazonSNSAsyncClient.class);
+		SnsAsyncClient client = Mockito.mock(SnsAsyncClient.class);
 		MaxwellContext context = mock(MaxwellContext.class);
 		when(context.getConfig()).thenReturn(new MaxwellConfig());
 		when(context.getMetrics()).thenReturn(new NoOpMetrics());
 		MaxwellSNSProducer producer = new MaxwellSNSProducer(context, FIFO_TOPIC, "", "");
 		producer.setClient(client);
 		AbstractAsyncProducer.CallbackCompleter cc = mock(AbstractAsyncProducer.CallbackCompleter.class);
-		when(client.publishAsync(any())).thenReturn(mockedFuture);
+		when(client.publish(any(PublishRequest.class))).thenReturn(mockedFuture);
 		producer.sendAsync(rowMap, cc);
-		Mockito.verify(client, times(1)).publishAsync(arguments.capture(), any());
-		Map<String, MessageAttributeValue> attributes = arguments.getValue().getMessageAttributes();
-		Assert.assertEquals("MyDatabase", arguments.getValue().getMessageGroupId());
+		Mockito.verify(client, times(1)).publish(arguments.capture());
+		Assert.assertEquals("MyDatabase", arguments.getValue().messageGroupId());
 	}
 }

@@ -1,11 +1,10 @@
 package com.zendesk.maxwell.filtering;
 
-import com.amazonaws.util.StringInputStream;
-
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.StreamTokenizer;
-import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -22,11 +21,7 @@ public class FilterParser {
 	}
 
 	public List<FilterPattern> parse() throws InvalidFilterException {
-		try {
-			this.inputStream = new InputStreamReader(new StringInputStream(input));
-		} catch ( UnsupportedEncodingException e ) {
-			throw new InvalidFilterException(e.getMessage());
-		}
+		this.inputStream = new InputStreamReader(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)));
 
 		this.tokenizer = new StreamTokenizer(inputStream);
 		try {
