@@ -1,31 +1,25 @@
 package com.zendesk.maxwell.producer;
 
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.handlers.AsyncHandler;
-import com.amazonaws.services.sns.AmazonSNSAsync;
-import com.amazonaws.services.sns.AmazonSNSAsyncClientBuilder;
-import com.amazonaws.services.sns.model.MessageAttributeValue;
-import com.amazonaws.services.sns.model.PublishRequest;
-import com.amazonaws.services.sns.model.PublishResult;
 import com.zendesk.maxwell.MaxwellContext;
 import com.zendesk.maxwell.producer.partitioners.MaxwellSNSPartitioner;
 import com.zendesk.maxwell.replication.Position;
 import com.zendesk.maxwell.row.RowMap;
-import org.apache.commons.lang3.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sns.SnsAsyncClient;
+import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sns.model.PublishRequest;
+import software.amazon.awssdk.services.sns.model.PublishResponse;
 
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 
 public class MaxwellSNSProducer extends AbstractAsyncProducer {
 
-	private AmazonSNSAsync client;
+	private SnsAsyncClient client;
 	private String topic;
-	private String[] stringFelds = {"database", "table"};
-	private String[] numberFields = {"ts", "xid"};
 	private MaxwellSNSPartitioner partitioner;
 
 	public MaxwellSNSProducer(MaxwellContext context, String topic, String serviceEndpoint, String signingRegion) {
@@ -35,12 +29,13 @@ public class MaxwellSNSProducer extends AbstractAsyncProducer {
 		// Only configure custom endpoint if both serviceEndpoint and signingRegion are provided
 		if (serviceEndpoint != null && !serviceEndpoint.trim().isEmpty() &&
 			signingRegion != null && !signingRegion.trim().isEmpty()) {
-			this.client = AmazonSNSAsyncClientBuilder.standard()
-					.withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(serviceEndpoint, signingRegion))
+			this.client = SnsAsyncClient.builder()
+					.endpointOverride(URI.create(serviceEndpoint))
+					.region(Region.of(signingRegion))
 					.build();
 		} else {
 			// Use default client configuration when endpoint parameters are not provided
-			this.client = AmazonSNSAsyncClientBuilder.defaultClient();
+			this.client = SnsAsyncClient.create();
 		}
 		String partitionKey = context.getConfig().producerPartitionKey;
 		String partitionColumns = context.getConfig().producerPartitionColumns;
@@ -48,17 +43,15 @@ public class MaxwellSNSProducer extends AbstractAsyncProducer {
 		this.partitioner = new MaxwellSNSPartitioner(partitionKey, partitionColumns, partitionFallback);
 	}
 
-	public void setClient(AmazonSNSAsync client) {
+	public void setClient(SnsAsyncClient client) {
 		this.client = client;
 	}
 
 	@Override
 	public void sendAsync(RowMap r, CallbackCompleter cc) throws Exception {
 		String value = r.toJSON(outputConfig);
-		// Publish a message to an Amazon SNS topic.
-		final PublishRequest publishRequest = new PublishRequest(topic, value);
-		Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
 
+		Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
 		final String configuredAttributes = context.getConfig().snsAttrs;
 		if (configuredAttributes != null) {
 			for (String element: configuredAttributes.split(",")) {
@@ -66,33 +59,39 @@ public class MaxwellSNSProducer extends AbstractAsyncProducer {
 					case "database":
 						messageAttributes.put(
 							"database",
-							new MessageAttributeValue().withDataType("String").withStringValue(r.getDatabase())
+							MessageAttributeValue.builder().dataType("String").stringValue(r.getDatabase()).build()
 						);
 						break;
 					case "table":
 						messageAttributes.put(
 							"table",
-							new MessageAttributeValue().withDataType("String").withStringValue(r.getTable())
+							MessageAttributeValue.builder().dataType("String").stringValue(r.getTable()).build()
 						);
 						break;
 				}
 			}
 		}
 
-		if ( topic.endsWith(".fifo")) {
+		PublishRequest.Builder builder = PublishRequest.builder()
+				.topicArn(topic)
+				.message(value)
+				.messageAttributes(messageAttributes);
+
+		if (topic.endsWith(".fifo")) {
 			String key = this.partitioner.getSNSKey(r);
-			publishRequest.setMessageGroupId(key);
+			builder.messageGroupId(key);
 		}
-		publishRequest.setMessageAttributes(messageAttributes);
+
+		PublishRequest publishRequest = builder.build();
 
 		SNSCallback callback = new SNSCallback(cc, r.getNextPosition(), value,
 			r.getDatabase(), r.getTable(), r.getRowIdentity().toConcatString(), r.getApproximateSize(), context);
-		client.publishAsync(publishRequest, callback);
+		client.publish(publishRequest).whenComplete(callback);
 	}
 
 }
 
-class SNSCallback implements AsyncHandler<PublishRequest, PublishResult> {
+class SNSCallback implements java.util.function.BiConsumer<PublishResponse, Throwable> {
 	public static final Logger logger = LoggerFactory.getLogger(SNSCallback.class);
 
 	private final AbstractAsyncProducer.CallbackCompleter cc;
@@ -118,23 +117,23 @@ class SNSCallback implements AsyncHandler<PublishRequest, PublishResult> {
 	}
 
 	@Override
-	public void onError(Exception t) {
-		logger.error(t.getClass().getSimpleName() + " @ " + position + " -- ");
-		logger.error("Database:" + database + ", Table:" + table + ", PK:" + pk + ", Approx Size:" + Long.toString(approximateRowSize));
-		logger.error(t.getLocalizedMessage());
-		logger.error("Exception during put", t);
+	public void accept(PublishResponse response, Throwable t) {
+		if (t != null) {
+			logger.error(t.getClass().getSimpleName() + " @ " + position + " -- ");
+			logger.error("Database:" + database + ", Table:" + table + ", PK:" + pk + ", Approx Size:" + Long.toString(approximateRowSize));
+			logger.error(t.getLocalizedMessage());
+			logger.error("Exception during put", t);
 
-		if (!context.getConfig().ignoreProducerError) {
-			context.terminate(new RuntimeException(t));
-		} else {
-			cc.markCompleted();
+			if (!context.getConfig().ignoreProducerError) {
+				context.terminate(new RuntimeException(t));
+			} else {
+				cc.markCompleted();
+			}
+			return;
 		}
-	};
 
-	@Override
-	public void onSuccess(PublishRequest request, PublishResult result) {
 		if (logger.isDebugEnabled()) {
-			logger.debug("-> MessageId: {}", result.getMessageId());
+			logger.debug("-> MessageId: {}", response.messageId());
 		}
 		cc.markCompleted();
 	}
